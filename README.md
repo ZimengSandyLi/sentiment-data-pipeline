@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Sentiment Data Pipeline — Phase I: Data Ingestion & Infrastructure
 
 ## Overview
@@ -132,3 +133,7 @@ Re-running the pipeline is safe. The script checks existing `review_id` values i
 - `app_version` and `reply` are currently 100% null. Google Play does not expose these fields via the unofficial endpoint used for scraping. These columns are retained in the schema for potential future use.
 - The pipeline uses `NEWEST` sort order, so collected reviews reflect recent activity. Historical coverage can be expanded in future iterations.
 - Both `app_version` and `reply` fields should be excluded from any modelling pipeline until data becomes available.
+=======
+# sentiment-data-pipeline
+A modular data pipeline for collecting, structuring, and storing user-generated app reviews — built as the foundational infrastructure for an AI-powered sentiment analysis system
+>>>>>>> 0ca87f6dc44ecea40e98be041eb7c013473516a3
