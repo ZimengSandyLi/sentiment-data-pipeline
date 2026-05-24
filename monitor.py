@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 
 
-# ── Configuration ─────────────────────────────────────────────
+# Configuration
 DEFAULT_DB        = "pipeline.db"
 DEFAULT_RUNS      = 10        # how many recent ingestion runs to show
 REPORT_FILE       = "monitor_report.txt"
@@ -34,30 +34,39 @@ ALERT_SHORT_TEXT_RATE   = 0.3    # alert if >30% of reviews are under 20 chars
 ALERT_MIN_REVIEWS       = 100    # alert if any successful run collected fewer than this
 
 
-# ── Helpers ───────────────────────────────────────────────────
-
+#Helpers
 def utcnow() -> str:
+    #returns current UTC time as a string
+    #using UTC so timestamps are consistent regardless of where the script is run
     return datetime.now(timezone.utc).isoformat()
 
-
 def get_connection(db_path: str) -> sqlite3.Connection:
+    #check the database file exists before trying to open it
+    #if it doesn't, it probably means pipeline.py hasn't been run yet
     if not os.path.exists(db_path):
         raise FileNotFoundError(
             f"Database not found: {db_path}. Run pipeline.py first."
         )
     conn = sqlite3.connect(db_path)
+    #row_factory lets us access query results by column name (e.g. row["app_name"])
+    #instead of by index (e.g. row[0]), which is much easier to read
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def divider(char="─", width=55):
+    #generates a divider line to make the report easier to read
+    #char and width can be changed — e.g. divider("═") for a heavier line
     return char * width
 
 
-# ── Report sections ───────────────────────────────────────────
+#Report sections 
 
 def section_overview(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
     """
+    pulls the top-level numbers from the database — total reviews, apps, runs,
+    success/failure counts, and the date range of collected reviews
+    if the failure rate is above the threshold, adds an alert to flag it
+
     High-level numbers: total reviews, apps, and ingestion runs.
     Returns (lines, alerts).
     """
@@ -96,8 +105,10 @@ def section_overview(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
 
 def section_run_history(conn: sqlite3.Connection, n: int) -> tuple[list[str], list[str]]:
     """
-    Shows the last N ingestion runs with status and review counts.
-    Alerts if any successful run collected suspiciously few reviews.
+    shows the most recent N ingestion runs with their status, review count, and timestamp
+    useful for quickly checking whether the pipeline has been running cleanly
+    only alerts on low volume if it's the first run for that app
+    incremental runs returning 0 is expected and not a problem
     """
     lines  = []
     alerts = []
@@ -274,7 +285,9 @@ def section_data_quality(conn: sqlite3.Connection) -> tuple[list[str], list[str]
 
 def section_rating_distribution(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
     """
-    Shows overall rating distribution — useful for spotting class imbalance.
+    shows the 1-5 star breakdown as a simple ASCII bar chart
+    makes it easy to see class imbalance immediately
+    matters for modelling later since 1★ and 5★ tend to dominate
     """
     lines  = []
     alerts = []
@@ -297,20 +310,21 @@ def section_rating_distribution(conn: sqlite3.Connection) -> tuple[list[str], li
 def health_summary(all_alerts: list[str]) -> list[str]:
     """
     Prints a final status based on whether any alerts were triggered.
+    WARNING with a list of issues if anything triggered
+    prints at the bottom of the report so the overall status is easy to find
     """
     lines = []
     if not all_alerts:
-        lines.append("  Status  : ✓ HEALTHY — no issues detected")
+        lines.append("  Status  : HEALTHY — no issues detected")
     else:
-        lines.append(f"  Status  : ⚠ WARNING — {len(all_alerts)} issue(s) detected")
+        lines.append(f"  Status  : WARNING — {len(all_alerts)} issue(s) detected")
         lines.append("")
         for alert in all_alerts:
-            lines.append(f"  ⚠  {alert}")
+            lines.append(f"{alert}")
     return lines
 
 
-# ── Report builder ────────────────────────────────────────────
-
+# Report builder
 def build_report(conn: sqlite3.Connection, n_runs: int) -> str:
     """
     Runs all sections and assembles the full report as a string.
@@ -324,7 +338,7 @@ def build_report(conn: sqlite3.Connection, n_runs: int) -> str:
     report.append(f"  Generated : {timestamp}")
     report.append(divider("═"))
 
-    # overview
+    #overview
     report.append("")
     report.append("  OVERVIEW")
     report.append(divider())
@@ -332,7 +346,7 @@ def build_report(conn: sqlite3.Connection, n_runs: int) -> str:
     report.extend(lines)
     all_alerts.extend(alerts)
 
-    # ingestion run history
+    #ingestion run history
     report.append("")
     report.append(f"  LAST {n_runs} INGESTION RUNS")
     report.append(divider())
@@ -340,7 +354,7 @@ def build_report(conn: sqlite3.Connection, n_runs: int) -> str:
     report.extend(lines)
     all_alerts.extend(alerts)
 
-    # volume per app
+    #volume per app
     report.append("")
     report.append("  COLLECTION VOLUME PER APP")
     report.append(divider())
@@ -356,7 +370,7 @@ def build_report(conn: sqlite3.Connection, n_runs: int) -> str:
     report.extend(lines)
     all_alerts.extend(alerts)
 
-    # data quality
+    #data quality
     report.append("")
     report.append("  DATA QUALITY")
     report.append(divider())
@@ -364,7 +378,7 @@ def build_report(conn: sqlite3.Connection, n_runs: int) -> str:
     report.extend(lines)
     all_alerts.extend(alerts)
 
-    # health summary
+    #health summary
     report.append("")
     report.append("  HEALTH SUMMARY")
     report.append(divider("═"))
@@ -374,8 +388,7 @@ def build_report(conn: sqlite3.Connection, n_runs: int) -> str:
     return "\n".join(report)
 
 
-# ── Main ──────────────────────────────────────────────────────
-
+#main entrance
 def main(db_path: str, n_runs: int):
     conn   = get_connection(db_path)
     report = build_report(conn, n_runs)
@@ -388,7 +401,6 @@ def main(db_path: str, n_runs: int):
     with open(REPORT_FILE, "w") as f:
         f.write(report)
     print(f"\nReport saved to {REPORT_FILE}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pipeline health monitor.")
