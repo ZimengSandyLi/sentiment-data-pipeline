@@ -66,6 +66,16 @@ def load_features():
 
 
 @st.cache_data(ttl=300)
+def load_priority_scores():
+    """Load pre-computed issue priority scores if available."""
+    score_path = "issue_priority.csv"
+    if not os.path.exists(score_path):
+        return pd.DataFrame()
+    df = pd.read_csv(score_path)
+    return df
+
+
+@st.cache_data(ttl=300)
 def load_ingestion_runs():
     if not os.path.exists(PIPELINE_DB):
         return pd.DataFrame()
@@ -107,6 +117,7 @@ st.sidebar.caption("Google Play Feedback Analytics")
 reviews_df  = load_reviews()
 features_df = load_features()
 runs_df     = load_ingestion_runs()
+priority_df = load_priority_scores()
 
 if reviews_df.empty:
     st.error("pipeline.db not found. Run pipeline.py first.")
@@ -121,6 +132,7 @@ page = st.sidebar.radio("View", [
     "Overview",
     "Sentiment Analysis",
     "Aspect Explorer",
+    "Issue Priority",
     "Data Quality",
     "Pipeline Health",
 ])
@@ -371,6 +383,87 @@ elif page == "Aspect Explorer":
         fig2.update_layout(plot_bgcolor='white', paper_bgcolor='white',
                            xaxis_tickangle=-30)
         st.plotly_chart(fig2, use_container_width=True)
+
+
+# ── Issue Priority ─────────────────────────────────────────────
+
+elif page == "Issue Priority":
+    st.title("Issue Priority Backlog")
+    st.caption(
+        "Ranked product issues combining sentiment severity (40%), "
+        "review volume (35%), and recency (25%). "
+        "Run `python prioritize.py` to refresh."
+    )
+
+    if priority_df.empty:
+        st.warning("issue_priority.csv not found. Run: `python prioritize.py` first.")
+        st.stop()
+
+    # filter by selected apps
+    prio = priority_df.copy()
+    if selected_apps:
+        prio = prio[prio['app_name'].isin(selected_apps)]
+
+    if prio.empty:
+        st.info("No priority data for selected apps.")
+        st.stop()
+
+    # top-level metrics
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Issues tracked", f"{len(prio):,}")
+    top_app = prio.groupby('app_name')['priority_score'].mean().idxmax()
+    col2.metric("Highest-risk app", top_app)
+    col3.metric("Avg negative rate", f"{prio['negative_rate'].mean()*100:.1f}%")
+
+    # top issues table
+    st.subheader("Top Issues")
+    top_n = st.slider("Show top N", 10, 50, 20, key="prio_top_n")
+
+    display = prio.head(top_n)[['rank','app_name','aspect','priority_score',
+                                 'negative_rate','mention_count','avg_rating']].copy()
+    display['negative_rate'] = (display['negative_rate'] * 100).round(1).astype(str) + '%'
+    display['priority_score'] = display['priority_score'].round(3)
+    display['avg_rating'] = display['avg_rating'].round(2)
+    display = display.rename(columns={
+        'rank': 'Rank', 'app_name': 'App', 'aspect': 'Issue',
+        'priority_score': 'Score', 'negative_rate': 'Neg%',
+        'mention_count': 'Mentions', 'avg_rating': 'Avg ★'
+    })
+    st.dataframe(display.set_index('Rank'), use_container_width=True)
+
+    # priority score bar chart
+    st.subheader("Priority Score by Issue")
+    top_issues = prio.head(top_n).copy()
+    top_issues['label'] = top_issues['app_name'] + ' / ' + top_issues['aspect']
+    fig = px.bar(
+        top_issues.sort_values('priority_score'),
+        x='priority_score', y='label', orientation='h',
+        color='negative_rate',
+        color_continuous_scale='RdYlGn_r',
+        labels={'priority_score': 'Priority Score', 'label': '',
+                'negative_rate': 'Neg rate'},
+        height=max(400, top_n * 22),
+    )
+    fig.update_layout(plot_bgcolor='white', paper_bgcolor='white',
+                      yaxis={'categoryorder': 'total ascending'})
+    st.plotly_chart(fig, use_container_width=True)
+
+    # per-app breakdown
+    st.subheader("Top Issue per App")
+    top_per_app = (prio.groupby('app_name')
+                   .apply(lambda g: g.nlargest(1, 'priority_score'))
+                   .reset_index(drop=True)
+                   [['app_name','aspect','priority_score','negative_rate','mention_count']])
+    top_per_app['negative_rate'] = (top_per_app['negative_rate']*100).round(1).astype(str) + '%'
+    top_per_app['priority_score'] = top_per_app['priority_score'].round(3)
+    st.dataframe(
+        top_per_app.rename(columns={
+            'app_name':'App','aspect':'Top Issue',
+            'priority_score':'Score','negative_rate':'Neg%',
+            'mention_count':'Mentions'
+        }).set_index('App'),
+        use_container_width=True,
+    )
 
 
 # ── Data Quality ───────────────────────────────────────────────
