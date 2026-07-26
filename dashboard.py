@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 import json
 from collections import Counter
 import os
+import anthropic
 
 # ── Config ─────────────────────────────────────────────────────
 PIPELINE_DB  = "pipeline.db"
@@ -109,6 +110,184 @@ SENTIMENT_COLORS = {
     "neutral":  "#9E9E9E",
 }
 
+
+# ── AI Query Engine ────────────────────────────────────────────
+
+def get_data_context(selected_apps: list) -> str:
+    """
+    Builds a structured summary of the current data to inject into the
+    Claude prompt as context. This is the RAG part — we retrieve relevant
+    data from the database and include it in the prompt so Claude can
+    answer questions grounded in actual numbers rather than hallucinating.
+    """
+    lines = []
+
+    # overall stats
+    conn_p = sqlite3.connect(PIPELINE_DB)
+    total  = pd.read_sql("SELECT COUNT(*) as n FROM reviews", conn_p).iloc[0]['n']
+    lines.append(f"Total reviews in database: {total:,}")
+    lines.append(f"Apps currently selected: {', '.join(selected_apps)}")
+    conn_p.close()
+
+    if not os.path.exists(FEATURES_DB):
+        return "\n".join(lines)
+
+    conn_f = sqlite3.connect(FEATURES_DB)
+
+    # sentiment breakdown per app
+    sent = pd.read_sql("""
+        SELECT app_name, combined_label, COUNT(*) as n
+        FROM features
+        WHERE app_name IN ({})
+        GROUP BY app_name, combined_label
+    """.format(",".join(f"'{a}'" for a in selected_apps)), conn_f)
+
+    lines.append("\nSentiment breakdown per app:")
+    for app, group in sent.groupby('app_name'):
+        total_app = group['n'].sum()
+        neg = group[group['combined_label']=='negative']['n'].sum()
+        pos = group[group['combined_label']=='positive']['n'].sum()
+        lines.append(f"  {app}: {pos:,} positive ({pos/total_app*100:.1f}%), "
+                     f"{neg:,} negative ({neg/total_app*100:.1f}%)")
+
+    # top aspects per app
+    feat = pd.read_sql("""
+        SELECT app_name, spacy_aspects, combined_label
+        FROM features
+        WHERE app_name IN ({}) AND spacy_aspects IS NOT NULL
+    """.format(",".join(f"'{a}'" for a in selected_apps)), conn_f)
+    conn_f.close()
+
+    lines.append("\nTop negative aspects per app:")
+    for app, group in feat.groupby('app_name'):
+        neg_reviews = group[group['combined_label'] == 'negative']
+        aspects = []
+        for val in neg_reviews['spacy_aspects']:
+            try:
+                aspects.extend(json.loads(val))
+            except Exception:
+                pass
+        from collections import Counter
+        top = Counter(aspects).most_common(5)
+        top_str = ", ".join(f"{a}({c})" for a, c in top)
+        lines.append(f"  {app}: {top_str}")
+
+    # priority scores if available
+    if os.path.exists("issue_priority.csv"):
+        prio = pd.read_csv("issue_priority.csv")
+        prio = prio[prio['app_name'].isin(selected_apps)]
+        if not prio.empty:
+            lines.append("\nTop 5 priority issues overall:")
+            for _, row in prio.head(5).iterrows():
+                lines.append(
+                    f"  #{int(row['rank'])} {row['app_name']} / {row['aspect']} "
+                    f"(score {row['priority_score']:.3f}, {row['negative_rate']*100:.1f}% negative, "
+                    f"{int(row['mention_count'])} mentions)"
+                )
+
+    return "\n".join(lines)
+
+
+def fetch_relevant_reviews(question: str, selected_apps: list,
+                            n: int = 15) -> str:
+    """
+    Searches the features database for negative reviews that are relevant
+    to the user's question, based on keyword matching in the review text.
+    Returns a formatted string of review excerpts to inject into the prompt.
+    This is the retrieval step in our RAG pipeline.
+    """
+    if not os.path.exists(FEATURES_DB):
+        return ""
+
+    # extract keywords from question — remove common stop words
+    stop = {"the","a","an","is","are","has","have","what","which","app",
+            "most","more","about","with","for","how","many","any","of",
+            "in","on","at","to","and","or","do","does"}
+    words = [w.lower() for w in question.split() if w.lower() not in stop and len(w) > 2]
+    if not words:
+        return ""
+
+    conn = sqlite3.connect(FEATURES_DB)
+    try:
+        # search for reviews mentioning any of the keywords
+        like_clauses = " OR ".join([f"LOWER(text) LIKE '%{w}%'" for w in words[:4]])
+        app_filter   = ",".join(f"'{a}'" for a in selected_apps)
+
+        reviews = pd.read_sql(f"""
+            SELECT app_name, rating, text, combined_label
+            FROM features
+            WHERE combined_label = 'negative'
+              AND app_name IN ({app_filter})
+              AND ({like_clauses})
+            ORDER BY RANDOM()
+            LIMIT {n}
+        """, conn)
+    except Exception:
+        conn.close()
+        return ""
+    conn.close()
+
+    if reviews.empty:
+        return ""
+
+    lines = [f"\nRelevant negative reviews ({len(reviews)} sampled):"]
+    for _, row in reviews.iterrows():
+        preview = str(row["text"])[:200].replace("\n", " ")
+        lines.append(f"  [{row['app_name']} | {row['rating']}★] {preview}")
+
+    return "\n".join(lines)
+
+
+def ask_claude(question: str, context: str, selected_apps: list) -> str:
+    """
+    Sends the user's question to Claude with two sources of context:
+      1. Aggregated stats (sentiment breakdown, top aspects, priority scores)
+      2. Actual review excerpts relevant to the question (RAG retrieval)
+
+    The review excerpts let Claude summarise specific user complaints,
+    not just report numbers.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "ANTHROPIC_API_KEY not set. Run: export ANTHROPIC_API_KEY=your_key"
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # retrieve relevant reviews to ground the answer
+    review_excerpts = fetch_relevant_reviews(question, selected_apps)
+
+    system = """You are a product analytics assistant helping a product team 
+understand user feedback from app store reviews. You have access to both 
+aggregated sentiment data and actual review excerpts.
+
+When relevant reviews are provided:
+- Summarise the specific issues users are describing, not just the numbers
+- Group similar complaints together (e.g. "Users report 3 main issues: ...")
+- Quote brief phrases from reviews to make the answer concrete
+
+Keep answers focused and under 150 words unless detail is needed."""
+
+    prompt = f"""Aggregated data context:
+{context}
+{review_excerpts}
+
+User question: {question}
+
+Please answer based on the data above. If review excerpts are available, 
+summarise what users are specifically complaining about."""
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+    except Exception as e:
+        return f"Error calling Claude API: {e}"
+
+
 # ── Sidebar ────────────────────────────────────────────────────
 
 st.sidebar.title("📱 Review Intelligence")
@@ -136,6 +315,41 @@ page = st.sidebar.radio("View", [
     "Data Quality",
     "Pipeline Health",
 ])
+
+# ── Ask AI (sidebar) ──────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.subheader("🤖 Ask AI")
+st.sidebar.caption("Ask questions about the review data in plain English.")
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+user_question = st.sidebar.text_input(
+    "Your question",
+    placeholder="e.g. Which app has the most complaints about login?",
+    key="ai_question",
+)
+
+if st.sidebar.button("Ask", key="ask_btn") and user_question:
+    with st.sidebar:
+        with st.spinner("Thinking..."):
+            context = get_data_context(selected_apps)
+            answer  = ask_claude(user_question, context, selected_apps)
+            st.session_state.chat_history.append({
+                "q": user_question, "a": answer
+            })
+
+# show conversation history in sidebar
+if st.session_state.chat_history:
+    st.sidebar.markdown("---")
+    for turn in reversed(st.session_state.chat_history[-3:]):   # last 3 turns
+        st.sidebar.markdown(f"**Q:** {turn['q']}")
+        st.sidebar.markdown(f"**A:** {turn['a']}")
+        st.sidebar.markdown("---")
+
+    if st.sidebar.button("Clear chat", key="clear_btn"):
+        st.session_state.chat_history = []
+        st.rerun()
 
 # apply app filter
 rev = reviews_df[reviews_df['app_name'].isin(selected_apps)]
