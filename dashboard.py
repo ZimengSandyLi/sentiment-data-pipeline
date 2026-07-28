@@ -72,9 +72,9 @@ st.set_page_config(
 # load Supabase URL from secrets or environment
 # must happen after set_page_config
 try:
-    _secret_url = st.secrets.get("DATABASE_URL", None) if os.path.exists(
-        os.path.expanduser("~/.streamlit/secrets.toml")
-    ) or os.path.exists(".streamlit/secrets.toml") else None
+    # on Streamlit Cloud, secrets are injected directly into st.secrets
+    # no file check needed — just try to read and catch if not available
+    _secret_url = st.secrets["DATABASE_URL"]
 except Exception:
     _secret_url = None
 SUPABASE_URL = _secret_url or os.environ.get("DATABASE_URL")
