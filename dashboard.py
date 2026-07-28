@@ -23,6 +23,45 @@ import anthropic
 PIPELINE_DB  = "pipeline.db"
 FEATURES_DB  = "features.db"
 
+# Database connection — uses Supabase if DATABASE_URL is set (Streamlit Cloud),
+# falls back to local SQLite for local development
+# DATABASE_URL will be set later after set_page_config
+# to avoid Streamlit initialization order issues
+SUPABASE_URL = None
+
+def get_conn(db_path: str = None):
+    """
+    Returns a database connection.
+    If DATABASE_URL is set, connects to Supabase PostgreSQL.
+    Otherwise connects to local SQLite.
+    """
+    if SUPABASE_URL:
+        try:
+            import psycopg2
+            return psycopg2.connect(SUPABASE_URL)
+        except Exception as e:
+            st.warning(f"Supabase connection failed, falling back to SQLite: {e}")
+    if db_path and os.path.exists(db_path):
+        return sqlite3.connect(db_path)
+    return None
+
+
+def read_sql(query: str, db_path: str = None) -> pd.DataFrame:
+    """
+    Runs a SQL query against either Supabase or local SQLite.
+    Handles the connection automatically.
+    """
+    conn = get_conn(db_path)
+    if conn is None:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql(query, conn)
+        conn.close()
+        return df
+    except Exception as e:
+        conn.close()
+        return pd.DataFrame()
+
 st.set_page_config(
     page_title  = "Review Intelligence Dashboard",
     page_icon   = "📱",
@@ -30,26 +69,35 @@ st.set_page_config(
     initial_sidebar_state = "expanded",
 )
 
+# load Supabase URL from secrets or environment
+# must happen after set_page_config
+try:
+    _secret_url = st.secrets.get("DATABASE_URL", None) if os.path.exists(
+        os.path.expanduser("~/.streamlit/secrets.toml")
+    ) or os.path.exists(".streamlit/secrets.toml") else None
+except Exception:
+    _secret_url = None
+SUPABASE_URL = _secret_url or os.environ.get("DATABASE_URL")
+
 # ── Helpers ────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300)   # cache for 5 minutes
+@st.cache_data(ttl=300)
 def load_reviews():
-    if not os.path.exists(PIPELINE_DB):
-        return pd.DataFrame()
-    conn = sqlite3.connect(PIPELINE_DB)
-    df = pd.read_sql("""
+    df = read_sql("""
         SELECT r.review_id, a.app_name, r.rating, r.text,
                r.thumbs_up, r.date, r.scraped_at
         FROM reviews r
         JOIN apps a ON r.app_id = a.app_id
-    """, conn)
-    conn.close()
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    """, PIPELINE_DB)
+    if not df.empty:
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
     return df
 
 
 @st.cache_data(ttl=300)
 def load_features():
+    # features.db is local only — not migrated to Supabase
+    # on Streamlit Cloud this will return empty and charts will be hidden
     if not os.path.exists(FEATURES_DB):
         return pd.DataFrame()
     conn = sqlite3.connect(FEATURES_DB)
@@ -78,18 +126,15 @@ def load_priority_scores():
 
 @st.cache_data(ttl=300)
 def load_ingestion_runs():
-    if not os.path.exists(PIPELINE_DB):
-        return pd.DataFrame()
-    conn = sqlite3.connect(PIPELINE_DB)
-    df = pd.read_sql("""
+    df = read_sql("""
         SELECT i.id, a.app_name, i.started_at,
                i.completed_at, i.reviews_collected, i.status
         FROM ingestion_runs i
         JOIN apps a ON i.app_id = a.app_id
         ORDER BY i.started_at DESC
-    """, conn)
-    conn.close()
-    df['started_at'] = pd.to_datetime(df['started_at'], errors='coerce')
+    """, PIPELINE_DB)
+    if not df.empty:
+        df['started_at'] = pd.to_datetime(df['started_at'], errors='coerce')
     return df
 
 
@@ -123,11 +168,10 @@ def get_data_context(selected_apps: list) -> str:
     lines = []
 
     # overall stats
-    conn_p = sqlite3.connect(PIPELINE_DB)
-    total  = pd.read_sql("SELECT COUNT(*) as n FROM reviews", conn_p).iloc[0]['n']
+    total_df = read_sql("SELECT COUNT(*) as n FROM reviews", PIPELINE_DB)
+    total = total_df.iloc[0]['n'] if not total_df.empty else 0
     lines.append(f"Total reviews in database: {total:,}")
     lines.append(f"Apps currently selected: {', '.join(selected_apps)}")
-    conn_p.close()
 
     if not os.path.exists(FEATURES_DB):
         return "\n".join(lines)
