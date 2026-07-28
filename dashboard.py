@@ -38,9 +38,11 @@ def get_conn(db_path: str = None):
     if SUPABASE_URL:
         try:
             import psycopg2
-            return psycopg2.connect(SUPABASE_URL)
+            conn = psycopg2.connect(SUPABASE_URL)
+            return conn
         except Exception as e:
-            st.warning(f"Supabase connection failed, falling back to SQLite: {e}")
+            st.warning(f"Supabase connection failed: {e}")
+            return None
     if db_path and os.path.exists(db_path):
         return sqlite3.connect(db_path)
     return None
@@ -343,7 +345,10 @@ runs_df     = load_ingestion_runs()
 priority_df = load_priority_scores()
 
 if reviews_df.empty:
-    st.error("pipeline.db not found. Run pipeline.py first.")
+    if SUPABASE_URL:
+        st.error("Could not connect to Supabase. Check DATABASE_URL in Secrets.")
+    else:
+        st.error("pipeline.db not found. Run pipeline.py first.")
     st.stop()
 
 all_apps = sorted(reviews_df['app_name'].unique())
