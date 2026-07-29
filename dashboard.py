@@ -98,12 +98,8 @@ def load_reviews():
 
 @st.cache_data(ttl=300)
 def load_features():
-    # features.db is local only — not migrated to Supabase
-    # on Streamlit Cloud this will return empty and charts will be hidden
-    if not os.path.exists(FEATURES_DB):
-        return pd.DataFrame()
-    conn = sqlite3.connect(FEATURES_DB)
-    df = pd.read_sql("""
+    # try Supabase first, fall back to local features.db
+    df = read_sql("""
         SELECT review_id, app_name, rating, text,
                vader_label, vader_compound,
                combined_label, combined_score,
@@ -111,18 +107,22 @@ def load_features():
                spacy_aspects, spacy_aspect_count,
                processed_at
         FROM features
-    """, conn)
-    conn.close()
+    """, FEATURES_DB)
     return df
 
 
 @st.cache_data(ttl=300)
 def load_priority_scores():
-    """Load pre-computed issue priority scores if available."""
-    score_path = "issue_priority.csv"
-    if not os.path.exists(score_path):
-        return pd.DataFrame()
-    df = pd.read_csv(score_path)
+    """Load issue priority scores from Supabase or local CSV."""
+    df = read_sql("""
+        SELECT rank, app_name, aspect, mention_count,
+               negative_count, positive_count, negative_rate,
+               avg_rating, priority_score
+        FROM issue_priority
+        ORDER BY rank
+    """, None)
+    if df.empty and os.path.exists("issue_priority.csv"):
+        df = pd.read_csv("issue_priority.csv")
     return df
 
 
@@ -175,10 +175,11 @@ def get_data_context(selected_apps: list) -> str:
     lines.append(f"Total reviews in database: {total:,}")
     lines.append(f"Apps currently selected: {', '.join(selected_apps)}")
 
-    if not os.path.exists(FEATURES_DB):
+    conn_f = None
+    if os.path.exists(FEATURES_DB):
+        conn_f = sqlite3.connect(FEATURES_DB)
+    elif not SUPABASE_URL:
         return "\n".join(lines)
-
-    conn_f = sqlite3.connect(FEATURES_DB)
 
     # sentiment breakdown per app
     sent = pd.read_sql("""
@@ -346,9 +347,9 @@ priority_df = load_priority_scores()
 
 if reviews_df.empty:
     if SUPABASE_URL:
-        st.error("Could not connect to Supabase. Check DATABASE_URL in Secrets.")
+        st.error(f"Could not connect to Supabase. URL starts with: {str(SUPABASE_URL)[:30]}...")
     else:
-        st.error("pipeline.db not found. Run pipeline.py first.")
+        st.error("No DATABASE_URL found in secrets or environment. Add it in Streamlit Cloud secrets.")
     st.stop()
 
 all_apps = sorted(reviews_df['app_name'].unique())
