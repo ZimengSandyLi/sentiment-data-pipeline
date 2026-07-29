@@ -711,12 +711,12 @@ elif page == "Issue Priority":
                       yaxis={'categoryorder': 'total ascending'})
     st.plotly_chart(fig, use_container_width=True)
 
-    # per-app breakdown
+    # per-app breakdown — sort and deduplicate to get top issue per app
     st.subheader("Top Issue per App")
-    top_per_app = (prio.groupby('app_name')
-                   .apply(lambda g: g.nlargest(1, 'priority_score'))
-                   .reset_index(drop=True)
-                   [['app_name','aspect','priority_score','negative_rate','mention_count']])
+    top_per_app = (prio.sort_values('priority_score', ascending=False)
+                   .drop_duplicates(subset=['app_name'], keep='first')
+                   [['app_name','aspect','priority_score','negative_rate','mention_count']]
+                   .copy())
     top_per_app['negative_rate'] = (top_per_app['negative_rate']*100).round(1).astype(str) + '%'
     top_per_app['priority_score'] = top_per_app['priority_score'].round(3)
     st.dataframe(
