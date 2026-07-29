@@ -117,7 +117,8 @@ def load_priority_scores():
     df = read_sql("""
         SELECT rank, app_name, aspect, mention_count,
                negative_count, positive_count, negative_rate,
-               avg_rating, priority_score
+               avg_rating, recency_score_raw, sentiment_norm,
+               volume_norm, recency_norm, priority_score
         FROM issue_priority
         ORDER BY rank
     """, None)
@@ -175,53 +176,51 @@ def get_data_context(selected_apps: list) -> str:
     lines.append(f"Total reviews in database: {total:,}")
     lines.append(f"Apps currently selected: {', '.join(selected_apps)}")
 
-    conn_f = None
-    if os.path.exists(FEATURES_DB):
-        conn_f = sqlite3.connect(FEATURES_DB)
-    elif not SUPABASE_URL:
-        return "\n".join(lines)
-
-    # sentiment breakdown per app
-    sent = pd.read_sql("""
+    # sentiment breakdown per app — use read_sql which handles both Supabase and SQLite
+    app_filter = ",".join(f"\'{a}\'" for a in selected_apps)
+    sent = read_sql(f"""
         SELECT app_name, combined_label, COUNT(*) as n
         FROM features
-        WHERE app_name IN ({})
+        WHERE app_name IN ({app_filter})
         GROUP BY app_name, combined_label
-    """.format(",".join(f"'{a}'" for a in selected_apps)), conn_f)
+    """, FEATURES_DB)
 
-    lines.append("\nSentiment breakdown per app:")
-    for app, group in sent.groupby('app_name'):
-        total_app = group['n'].sum()
-        neg = group[group['combined_label']=='negative']['n'].sum()
-        pos = group[group['combined_label']=='positive']['n'].sum()
-        lines.append(f"  {app}: {pos:,} positive ({pos/total_app*100:.1f}%), "
-                     f"{neg:,} negative ({neg/total_app*100:.1f}%)")
+    if not sent.empty:
+        lines.append("\nSentiment breakdown per app:")
+        for app, group in sent.groupby('app_name'):
+            total_app = group['n'].sum()
+            neg = group[group['combined_label']=='negative']['n'].sum()
+            pos = group[group['combined_label']=='positive']['n'].sum()
+            lines.append(f"  {app}: {pos:,} positive ({pos/total_app*100:.1f}%), "
+                         f"{neg:,} negative ({neg/total_app*100:.1f}%)")
 
     # top aspects per app
-    feat = pd.read_sql("""
+    feat = read_sql(f"""
         SELECT app_name, spacy_aspects, combined_label
         FROM features
-        WHERE app_name IN ({}) AND spacy_aspects IS NOT NULL
-    """.format(",".join(f"'{a}'" for a in selected_apps)), conn_f)
-    conn_f.close()
+        WHERE app_name IN ({app_filter}) AND spacy_aspects IS NOT NULL
+    """, FEATURES_DB)
 
-    lines.append("\nTop negative aspects per app:")
-    for app, group in feat.groupby('app_name'):
-        neg_reviews = group[group['combined_label'] == 'negative']
-        aspects = []
-        for val in neg_reviews['spacy_aspects']:
-            try:
-                aspects.extend(json.loads(val))
-            except Exception:
-                pass
-        from collections import Counter
-        top = Counter(aspects).most_common(5)
-        top_str = ", ".join(f"{a}({c})" for a, c in top)
-        lines.append(f"  {app}: {top_str}")
+    if not feat.empty:
+        lines.append("\nTop negative aspects per app:")
+        for app, group in feat.groupby('app_name'):
+            neg_reviews = group[group['combined_label'] == 'negative']
+            aspects = []
+            for val in neg_reviews['spacy_aspects']:
+                try:
+                    aspects.extend(json.loads(val))
+                except Exception:
+                    pass
+            from collections import Counter
+            top = Counter(aspects).most_common(5)
+            top_str = ", ".join(f"{a}({c})" for a, c in top)
+            lines.append(f"  {app}: {top_str}")
 
-    # priority scores if available
-    if os.path.exists("issue_priority.csv"):
+    # priority scores from Supabase or local CSV
+    prio = read_sql("SELECT * FROM issue_priority ORDER BY rank", None)
+    if prio.empty and os.path.exists("issue_priority.csv"):
         prio = pd.read_csv("issue_priority.csv")
+    if not prio.empty:
         prio = prio[prio['app_name'].isin(selected_apps)]
         if not prio.empty:
             lines.append("\nTop 5 priority issues overall:")
