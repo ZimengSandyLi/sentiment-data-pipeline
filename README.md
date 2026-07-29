@@ -113,12 +113,59 @@ Three tables: `apps`, `reviews`, `ingestion_runs`.
 
 The `ingestion_runs` table tracks every pipeline execution — when it started, how many reviews were collected, and whether it succeeded. This provides full data lineage and makes debugging straightforward.
 
+#### `apps`
+Stores metadata for each app being tracked.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `app_id` | TEXT (PK) | Google Play package name (e.g. `com.spotify.music`) |
+| `app_name` | TEXT | Human-readable app name |
+| `category` | TEXT | App category (e.g. `music`, `productivity`) |
+| `created_at` | TIMESTAMP | When the app was first added to the database |
+
+#### `reviews`
+Main table. One row per review.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER (PK) | Auto-incremented internal ID |
+| `review_id` | TEXT (UNIQUE) | Google Play review ID — prevents duplicate ingestion |
+| `app_id` | TEXT (FK) | References `apps.app_id` |
+| `ingestion_run_id` | INTEGER (FK) | References `ingestion_runs.id` |
+| `rating` | INTEGER | Star rating (1–5) |
+| `text` | TEXT | Review body text |
+| `date` | TIMESTAMP | When the user wrote the review |
+| `app_version` | TEXT | App version at time of review (currently unavailable from endpoint) |
+| `thumbs_up` | INTEGER | Number of helpful votes |
+| `reply` | TEXT | Developer reply (currently unavailable from endpoint) |
+| `lang` | TEXT | Language code (e.g. `en`) |
+| `country` | TEXT | Country code (e.g. `us`) |
+| `scraped_at` | TIMESTAMP | When this review was collected by the pipeline |
+
+#### `ingestion_runs`
+Tracks every pipeline execution.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER (PK) | Auto-incremented run ID |
+| `app_id` | TEXT (FK) | References `apps.app_id` |
+| `started_at` | TIMESTAMP | When the run began |
+| `completed_at` | TIMESTAMP | When the run finished (NULL if still in progress) |
+| `reviews_collected` | INTEGER | Number of new reviews inserted in this run |
+| `status` | TEXT | `in_progress`, `success`, or `failed` |
+
+#### Design Decisions
+- **`review_id` as unique key** — prevents duplicate rows if the pipeline is re-run, making incremental updates safe by default.
+- **`ingestion_runs` table** — provides full traceability of when data was collected, useful for debugging and scheduled incremental updates.
+- **`app_version` and `reply` retained despite being 100% null** — these fields are logically meaningful and reserved for future use if the data becomes available.
+- **SQLite for local development** — lightweight, zero-configuration, and sufficient for prototyping. Migrated to PostgreSQL for cloud deployment.
+
 ### Cloud PostgreSQL (Supabase)
 
 Same schema as SQLite, plus two additional tables:
 
-- `features` — NLP-extracted signals per review (sentiment, subjectivity, aspects)
-- `issue_priority` — ranked product issue backlog
+- `features` — NLP-extracted signals per review (sentiment labels, subjectivity scores, aspect lists, processed_at)
+- `issue_priority` — ranked product issue backlog with priority scores
 
 The dashboard reads from Supabase when `DATABASE_URL` is set, falling back to local SQLite for development.
 
